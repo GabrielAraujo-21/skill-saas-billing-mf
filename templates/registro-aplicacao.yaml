@@ -1,0 +1,11 @@
+# Guardar no projeto consumidor, por exemplo em docs/billing/registro-aplicacao.yaml.
+skill: skill-saas-billing-mf
+schema_version: "1.0.0"
+manifesto_sha256: ""  # python scripts/validar_skill.py --checksum
+aplicado_em: ""       # AAAA-MM-DD
+mapeamento: docs/billing/mapeamento-compatibilidade.yaml
+fases:
+  - codigo: "00"
+    situacao: pendente  # pendente | em_andamento | concluida | adiada
+    adr: ""
+    evidencias: ""

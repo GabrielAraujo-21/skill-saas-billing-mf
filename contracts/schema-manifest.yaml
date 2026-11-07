@@ -1,0 +1,942 @@
+{
+  "schema_version": "1.0.0",
+  "skill": "skill-saas-billing-mf",
+  "formato": "JSON válido, que também é YAML válido, para ser lido sem dependências externas.",
+  "convencoes": {
+    "nomes": "snake_case em pt-BR, sem acentos.",
+    "fuso_instantes": "UTC",
+    "datas_civis": "Colunas date não sofrem conversão de fuso.",
+    "moeda": "ISO 4217, maiúscula; catálogo validado para moedas com duas casas.",
+    "dinheiro": "decimal(12,2) em banco e string na API; float é proibido.",
+    "arredondamento": "Meio para cima (half-up) em duas casas, aplicado por linha antes de somar.",
+    "fk_padrao": "ON DELETE RESTRICT e ON UPDATE RESTRICT.",
+    "tenant_em_filhas": "Toda linha com tenant_id deve pertencer ao mesmo tenant das linhas referenciadas, por FK composta ou validação transacional."
+  },
+  "tabelas_externas": ["tenants"],
+  "enumeracoes": {
+    "status_versao": ["rascunho", "publicada", "encerrada"],
+    "periodicidade_preco": ["mensal", "anual"],
+    "periodicidade_adicional": ["mensal", "anual", "avulso"],
+    "periodicidade_limite": ["mensal", "anual", "sem_periodo"],
+    "modalidade_preco": ["fixo", "a_partir_de", "sob_consulta"],
+    "status_assinatura": ["pendente", "trial", "ativa", "inadimplente", "suspensa", "cancelamento_agendado", "cancelada", "expirada"],
+    "ambiente": ["sandbox", "producao"],
+    "status_fatura": ["rascunho", "aberta", "paga", "vencida", "cancelada", "reembolsada"],
+    "status_pagamento": ["pendente", "confirmado", "falhou", "cancelado", "reembolsado_parcial", "reembolsado", "contestado"],
+    "metodo_pagamento": ["cartao", "pix", "pix_automatico", "boleto"],
+    "tipo_desconto": ["percentual", "valor_fixo"],
+    "tipo_item_fatura": ["plano", "adicional", "implantacao", "prorrateamento", "ajuste"],
+    "tipo_evento_historico": ["criacao", "transicao_status", "renovacao", "alteracao_plano", "alteracao_item", "cancelamento", "ajuste_manual"],
+    "tipo_alteracao": ["upgrade", "downgrade", "troca_periodicidade", "troca_provedor"],
+    "status_alteracao": ["solicitada", "agendada", "efetivada", "cancelada", "falhou"],
+    "status_processamento_evento": ["recebido", "processando", "processado", "ignorado", "falhou"],
+    "status_reembolso": ["solicitado", "processando", "concluido", "falhou", "cancelado"],
+    "tipo_beneficio": ["cota_extra", "funcionalidade", "cortesia"],
+    "status_preco_provedor": ["pendente", "sincronizado", "erro", "desativado"]
+  },
+  "maquina_estados_assinatura": {
+    "iniciais": ["pendente", "trial"],
+    "terminais": ["cancelada", "expirada"],
+    "efetivos": ["pendente", "trial", "ativa", "inadimplente", "suspensa", "cancelamento_agendado"],
+    "transicoes": [
+      {"de": "pendente", "para": "ativa", "gatilho": "Pagamento confirmado por evento verificado do provedor ou plano sem cobrança."},
+      {"de": "pendente", "para": "cancelada", "gatilho": "Desistência antes da confirmação."},
+      {"de": "pendente", "para": "expirada", "gatilho": "Prazo de confirmação encerrado."},
+      {"de": "trial", "para": "ativa", "gatilho": "Conversão confirmada por evento verificado ou plano sem cobrança."},
+      {"de": "trial", "para": "cancelada", "gatilho": "Cancelamento durante o trial."},
+      {"de": "trial", "para": "expirada", "gatilho": "Fim do trial sem conversão."},
+      {"de": "ativa", "para": "inadimplente", "gatilho": "Falha de cobrança ou fatura vencida confirmada."},
+      {"de": "ativa", "para": "cancelamento_agendado", "gatilho": "Cancelamento solicitado para o fim do período."},
+      {"de": "ativa", "para": "cancelada", "gatilho": "Cancelamento imediato autorizado."},
+      {"de": "inadimplente", "para": "ativa", "gatilho": "Regularização confirmada."},
+      {"de": "inadimplente", "para": "suspensa", "gatilho": "Fim da tolerância definida em ADR."},
+      {"de": "inadimplente", "para": "cancelada", "gatilho": "Cancelamento solicitado ou política de inadimplência."},
+      {"de": "suspensa", "para": "ativa", "gatilho": "Regularização confirmada."},
+      {"de": "suspensa", "para": "cancelada", "gatilho": "Cancelamento solicitado ou política de inadimplência."},
+      {"de": "suspensa", "para": "expirada", "gatilho": "Fim do prazo de retenção da suspensão."},
+      {"de": "cancelamento_agendado", "para": "ativa", "gatilho": "Desistência do cancelamento antes do fim do período."},
+      {"de": "cancelamento_agendado", "para": "cancelada", "gatilho": "Fim do período pago."}
+    ],
+    "efeitos_acesso": {
+      "pendente": "Sem direitos pagos; somente regularizar o pagamento.",
+      "trial": "Direitos da versão contratada até trial_fim, com os limites definidos em ADR.",
+      "ativa": "Direitos integrais da versão contratada, itens e benefícios válidos.",
+      "inadimplente": "Direitos mantidos durante a tolerância definida em ADR, com aviso.",
+      "suspensa": "Leitura, exportação e regularização, conforme decisão comercial; sem novas operações.",
+      "cancelamento_agendado": "Direitos integrais até periodo_fim.",
+      "cancelada": "Sem uso; exportação conforme contrato, lei e retenção.",
+      "expirada": "Sem uso; exportação conforme contrato, lei e retenção."
+    }
+  },
+  "fases": [
+    {
+      "codigo": "00",
+      "modulo": "Diagnóstico e decisões",
+      "pre_condicoes": "Ler projeto, skills, git status, governança e tenancy.",
+      "gate": "Inventário e ADRs aprovados.",
+      "tabelas": []
+    },
+    {
+      "codigo": "01",
+      "modulo": "Catálogo de planos",
+      "pre_condicoes": "Fase 00; banco e padrão de IDs decididos.",
+      "gate": "Schema, CRUD administrativo, publicador versionado e testes.",
+      "tabelas": ["planos", "planos_versoes", "planos_precos"]
+    },
+    {
+      "codigo": "02",
+      "modulo": "Funcionalidades e limites",
+      "pre_condicoes": "Fase 01.",
+      "gate": "Entitlements e limites validados no backend.",
+      "tabelas": ["funcionalidades", "planos_funcionalidades", "planos_limites"]
+    },
+    {
+      "codigo": "03",
+      "modulo": "Assinaturas",
+      "pre_condicoes": "Fases 01 e 02; tenants existentes.",
+      "gate": "Estados, ciclos, versionamento e isolamento.",
+      "tabelas": ["assinaturas", "provedores_pagamento", "assinaturas_historicos", "assinaturas_alteracoes"]
+    },
+    {
+      "codigo": "04",
+      "modulo": "Consumo",
+      "pre_condicoes": "Fase 03.",
+      "gate": "Concorrência, idempotência e reconciliação.",
+      "tabelas": ["assinaturas_consumos", "consumos_eventos", "tenants_beneficios"]
+    },
+    {
+      "codigo": "05",
+      "modulo": "Financeiro e provedores",
+      "pre_condicoes": "Fases 01 e 03.",
+      "gate": "Testes em sandbox, webhooks e faturamento, sem cobrança real.",
+      "tabelas": ["faturas", "pagamentos", "faturas_itens", "pagamentos_eventos", "pagamentos_reembolsos", "planos_precos_provedores"]
+    },
+    {
+      "codigo": "06",
+      "modulo": "Adicionais e cupons",
+      "pre_condicoes": "Fases 03 a 05.",
+      "gate": "Regras de preço, limites e descontos com testes.",
+      "tabelas": ["assinaturas_itens", "adicionais", "cupons", "cupons_utilizacoes", "planos_adicionais"]
+    },
+    {
+      "codigo": "07",
+      "modulo": "APIs, interface e métricas",
+      "pre_condicoes": "Fases anteriores contratadas.",
+      "gate": "Contratos OpenAPI, filtros, RBAC, painel e E2E.",
+      "tabelas": []
+    }
+  ],
+  "tabelas": [
+    {
+      "ordem": 1,
+      "nome": "planos",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "01",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": true,
+      "politica_exclusao": "Soft delete; plano com versão publicada não é removido fisicamente.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "nome", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "slug", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "descricao", "tipo": "text", "nulo": true},
+        {"nome": "publico_alvo", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "destaque", "tipo": "boolean", "nulo": false, "padrao": false},
+        {"nome": "publico", "tipo": "boolean", "nulo": false, "padrao": false},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "ordem_exibicao", "tipo": "int", "nulo": false, "padrao": 0},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "deleted_at", "tipo": "timestamp", "nulo": true}
+      ],
+      "unicos": [{"nome": "uq_planos_slug", "colunas": ["slug"]}],
+      "indices": [],
+      "checks": []
+    },
+    {
+      "ordem": 2,
+      "nome": "planos_versoes",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "01",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Versão publicada é imutável quanto a direitos e preços; encerrar por status.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "numero_versao", "tipo": "int", "nulo": false},
+        {"nome": "nome_versao", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "padrao": "rascunho", "enum": "status_versao"},
+        {"nome": "vigencia_inicio", "tipo": "timestamp", "nulo": true},
+        {"nome": "vigencia_fim", "tipo": "timestamp", "nulo": true},
+        {"nome": "trial_dias", "tipo": "int", "nulo": false, "padrao": 0},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_planos_versoes_plano_numero", "colunas": ["plano_id", "numero_versao"]}],
+      "indices": [],
+      "checks": ["trial_dias >= 0", "vigencia_fim IS NULL OR vigencia_inicio IS NULL OR vigencia_fim > vigencia_inicio"]
+    },
+    {
+      "ordem": 3,
+      "nome": "planos_precos",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "01",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Preço histórico nunca é sobrescrito; publicar nova versão.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_versao_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "periodicidade", "tipo": "varchar(20)", "nulo": false, "enum": "periodicidade_preco"},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {
+          "nome": "modalidade_preco",
+          "tipo": "varchar(20)",
+          "nulo": false,
+          "padrao": "fixo",
+          "enum": "modalidade_preco",
+          "nota": "Acréscimo ao prompt: cobre valor de entrada e preço sob consulta."
+        },
+        {"nome": "valor", "tipo": "decimal(12,2)", "nulo": true, "nota": "NULL somente com modalidade_preco = sob_consulta."},
+        {"nome": "valor_implantacao", "tipo": "decimal(12,2)", "nulo": false, "padrao": "0.00"},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_planos_precos_versao_period_moeda", "colunas": ["plano_versao_id", "periodicidade", "moeda"]}],
+      "indices": [],
+      "checks": ["(modalidade_preco = 'sob_consulta' AND valor IS NULL) OR (modalidade_preco <> 'sob_consulta' AND valor IS NOT NULL AND valor >= 0)", "valor_implantacao >= 0"]
+    },
+    {
+      "ordem": 4,
+      "nome": "funcionalidades",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "02",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por ativo; o código nunca é reaproveitado.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "codigo", "tipo": "varchar(100)", "nulo": false, "nota": "Código durável, como integracoes.api."},
+        {"nome": "nome", "tipo": "varchar(150)", "nulo": false},
+        {"nome": "descricao", "tipo": "text", "nulo": true},
+        {"nome": "categoria", "tipo": "varchar(100)", "nulo": true},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_funcionalidades_codigo", "colunas": ["codigo"]}],
+      "indices": [],
+      "checks": []
+    },
+    {
+      "ordem": 5,
+      "nome": "planos_funcionalidades",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "02",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Exclusão física bloqueada por FK RESTRICT; encerrar por status ou ativo.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_versao_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "funcionalidade_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "funcionalidades", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "habilitado", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_planos_func_versao_func", "colunas": ["plano_versao_id", "funcionalidade_id"]}],
+      "indices": [{"nome": "idx_planos_funcionalidades_funcionalidade_id", "colunas": ["funcionalidade_id"]}],
+      "checks": []
+    },
+    {
+      "ordem": 6,
+      "nome": "planos_limites",
+      "grupo": "A",
+      "natureza": "nuclear",
+      "fase": "02",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Exclusão física bloqueada por FK RESTRICT; encerrar por status ou ativo.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_versao_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "recurso", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "limite", "tipo": "bigint", "nulo": true, "nota": "NULL = ilimitado comercialmente, sujeito a uso justo e limites técnicos."},
+        {
+          "nome": "periodicidade",
+          "tipo": "varchar(20)",
+          "nulo": false,
+          "padrao": "sem_periodo",
+          "enum": "periodicidade_limite",
+          "nota": "NOT NULL para a unicidade valer em todo SGBD."
+        },
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_planos_limites_versao_rec_period", "colunas": ["plano_versao_id", "recurso", "periodicidade"]}],
+      "indices": [],
+      "checks": ["limite IS NULL OR limite >= 0"]
+    },
+    {
+      "ordem": 7,
+      "nome": "assinaturas",
+      "grupo": "B",
+      "natureza": "nuclear",
+      "fase": "03",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Sem exclusão física; encerrar pela máquina de estados.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "plano_versao_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "plano_preco_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_precos", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {
+          "nome": "provedor_pagamento_id",
+          "tipo": "bigint",
+          "nulo": true,
+          "fk": {"tabela": "provedores_pagamento", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}
+        },
+        {"nome": "assinatura_externa_id", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "enum": "status_assinatura"},
+        {"nome": "periodicidade", "tipo": "varchar(20)", "nulo": false, "enum": "periodicidade_preco"},
+        {"nome": "valor_contratado", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {"nome": "trial_inicio", "tipo": "timestamp", "nulo": true},
+        {"nome": "trial_fim", "tipo": "timestamp", "nulo": true},
+        {"nome": "periodo_inicio", "tipo": "timestamp", "nulo": false},
+        {"nome": "periodo_fim", "tipo": "timestamp", "nulo": false},
+        {"nome": "proxima_cobranca_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "cancelamento_solicitado_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "cancelado_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [
+        {"nome": "uq_assinaturas_tenant_efetiva", "colunas": ["tenant_id"], "condicao": "status NOT IN ('cancelada', 'expirada')"},
+        {"nome": "uq_assinaturas_provedor_externa", "colunas": ["provedor_pagamento_id", "assinatura_externa_id"]}
+      ],
+      "indices": [
+        {"nome": "idx_assinaturas_tenant_status", "colunas": ["tenant_id", "status"]},
+        {"nome": "idx_assinaturas_status_cobranca", "colunas": ["status", "proxima_cobranca_em"]},
+        {"nome": "idx_assinaturas_plano_versao_id", "colunas": ["plano_versao_id"]},
+        {"nome": "idx_assinaturas_plano_preco_id", "colunas": ["plano_preco_id"]}
+      ],
+      "checks": ["valor_contratado >= 0", "periodo_fim > periodo_inicio"]
+    },
+    {
+      "ordem": 8,
+      "nome": "assinaturas_itens",
+      "grupo": "B",
+      "natureza": "nuclear",
+      "fase": "06",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por ativo; preserva o snapshot.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "adicional_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "adicionais", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "quantidade", "tipo": "int", "nulo": false},
+        {"nome": "valor_unitario", "tipo": "decimal(12,2)", "nulo": false, "nota": "Snapshot na contratação."},
+        {"nome": "valor_total", "tipo": "decimal(12,2)", "nulo": false, "nota": "Snapshot na contratação."},
+        {"nome": "periodicidade", "tipo": "varchar(20)", "nulo": false, "enum": "periodicidade_adicional"},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [],
+      "indices": [
+        {"nome": "idx_assinaturas_itens_tenant_assinatura", "colunas": ["tenant_id", "assinatura_id"]},
+        {"nome": "idx_assinaturas_itens_assinatura_id", "colunas": ["assinatura_id"]},
+        {"nome": "idx_assinaturas_itens_adicional_id", "colunas": ["adicional_id"]}
+      ],
+      "checks": ["quantidade > 0", "valor_unitario >= 0", "valor_total >= 0"]
+    },
+    {
+      "ordem": 9,
+      "nome": "assinaturas_consumos",
+      "grupo": "B",
+      "natureza": "nuclear",
+      "fase": "04",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Agregado reconciliável com consumos_eventos; não excluir no período de retenção.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "recurso", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "periodo_inicio", "tipo": "timestamp", "nulo": false},
+        {"nome": "periodo_fim", "tipo": "timestamp", "nulo": false},
+        {"nome": "quantidade_utilizada", "tipo": "bigint", "nulo": false, "padrao": 0},
+        {"nome": "ultima_atualizacao_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_consumos_assinatura_rec_periodo", "colunas": ["assinatura_id", "recurso", "periodo_inicio", "periodo_fim"]}],
+      "indices": [{"nome": "idx_consumos_tenant_recurso", "colunas": ["tenant_id", "recurso"]}],
+      "checks": ["periodo_fim > periodo_inicio", "quantidade_utilizada >= 0"]
+    },
+    {
+      "ordem": 10,
+      "nome": "provedores_pagamento",
+      "grupo": "C",
+      "natureza": "nuclear",
+      "fase": "03",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por ativo.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "nome", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "codigo", "tipo": "varchar(50)", "nulo": false},
+        {"nome": "ambiente", "tipo": "varchar(20)", "nulo": false, "enum": "ambiente"},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "configuracao_referencia", "tipo": "varchar(255)", "nulo": true, "nota": "Só o nome da configuração ou do cofre; nunca a credencial."},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_provedores_codigo_ambiente", "colunas": ["codigo", "ambiente"]}],
+      "indices": [],
+      "checks": []
+    },
+    {
+      "ordem": 11,
+      "nome": "faturas",
+      "grupo": "C",
+      "natureza": "nuclear",
+      "fase": "05",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Registro financeiro: sem soft delete nem exclusão; cancelar por status.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "numero", "tipo": "varchar(50)", "nulo": false},
+        {"nome": "competencia", "tipo": "date", "nulo": false, "nota": "Data civil, sem conversão de fuso."},
+        {"nome": "vencimento", "tipo": "date", "nulo": false, "nota": "Data civil, sem conversão de fuso."},
+        {"nome": "subtotal", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "desconto", "tipo": "decimal(12,2)", "nulo": false, "padrao": "0.00"},
+        {"nome": "valor_total", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "enum": "status_fatura"},
+        {"nome": "pago_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_faturas_numero", "colunas": ["numero"]}],
+      "indices": [
+        {"nome": "idx_faturas_tenant_status", "colunas": ["tenant_id", "status"]},
+        {"nome": "idx_faturas_status_vencimento", "colunas": ["status", "vencimento"]},
+        {"nome": "idx_faturas_assinatura_id", "colunas": ["assinatura_id"]}
+      ],
+      "checks": ["subtotal >= 0", "desconto >= 0", "valor_total >= 0"]
+    },
+    {
+      "ordem": 12,
+      "nome": "pagamentos",
+      "grupo": "C",
+      "natureza": "nuclear",
+      "fase": "05",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Registro financeiro: sem soft delete nem exclusão.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "fatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "faturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {
+          "nome": "provedor_pagamento_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "provedores_pagamento", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}
+        },
+        {"nome": "transacao_externa_id", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "chave_idempotencia", "tipo": "varchar(255)", "nulo": false, "nota": "Deve incluir tenant e operação, pois a unicidade é global."},
+        {"nome": "metodo_pagamento", "tipo": "varchar(30)", "nulo": false, "enum": "metodo_pagamento"},
+        {"nome": "valor", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "enum": "status_pagamento"},
+        {"nome": "pago_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [
+        {"nome": "uq_pagamentos_chave_idempotencia", "colunas": ["chave_idempotencia"]},
+        {"nome": "uq_pagamentos_provedor_transacao", "colunas": ["provedor_pagamento_id", "transacao_externa_id"]}
+      ],
+      "indices": [{"nome": "idx_pagamentos_tenant_status", "colunas": ["tenant_id", "status"]}, {"nome": "idx_pagamentos_fatura_id", "colunas": ["fatura_id"]}],
+      "checks": ["valor >= 0"]
+    },
+    {
+      "ordem": 13,
+      "nome": "adicionais",
+      "grupo": "D",
+      "natureza": "nuclear",
+      "fase": "06",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por ativo; preço contratado fica no item da assinatura.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "codigo", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "nome", "tipo": "varchar(150)", "nulo": false},
+        {"nome": "descricao", "tipo": "text", "nulo": true},
+        {"nome": "recurso", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "quantidade_recurso", "tipo": "bigint", "nulo": false},
+        {"nome": "valor", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "periodicidade", "tipo": "varchar(20)", "nulo": false, "enum": "periodicidade_adicional"},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_adicionais_codigo", "colunas": ["codigo"]}],
+      "indices": [],
+      "checks": ["quantidade_recurso > 0", "valor >= 0"]
+    },
+    {
+      "ordem": 14,
+      "nome": "cupons",
+      "grupo": "D",
+      "natureza": "nuclear",
+      "fase": "06",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por ativo; preserva utilizações.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "codigo", "tipo": "varchar(50)", "nulo": false},
+        {"nome": "descricao", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "tipo_desconto", "tipo": "varchar(20)", "nulo": false, "enum": "tipo_desconto"},
+        {"nome": "valor_desconto", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "quantidade_maxima", "tipo": "int", "nulo": true},
+        {"nome": "quantidade_por_tenant", "tipo": "int", "nulo": true},
+        {"nome": "valido_inicio", "tipo": "timestamp", "nulo": false},
+        {"nome": "valido_fim", "tipo": "timestamp", "nulo": false},
+        {"nome": "ativo", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "cumulativo", "tipo": "boolean", "nulo": false, "padrao": false, "nota": "Acréscimo ao prompt: regra de cumulatividade."},
+        {"nome": "planos_elegiveis", "tipo": "json", "nulo": true, "nota": "Acréscimo: slugs de plano; NULL = todos."},
+        {"nome": "periodicidades_elegiveis", "tipo": "json", "nulo": true, "nota": "Acréscimo: ciclos permitidos; NULL = todos."},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_cupons_codigo", "colunas": ["codigo"]}],
+      "indices": [],
+      "checks": [
+        "valor_desconto > 0",
+        "tipo_desconto <> 'percentual' OR valor_desconto <= 100",
+        "valido_fim > valido_inicio",
+        "quantidade_maxima IS NULL OR quantidade_maxima > 0",
+        "quantidade_por_tenant IS NULL OR quantidade_por_tenant > 0"
+      ]
+    },
+    {
+      "ordem": 15,
+      "nome": "cupons_utilizacoes",
+      "grupo": "D",
+      "natureza": "nuclear",
+      "fase": "06",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Registro financeiro: sem exclusão; compensar por lançamento.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "cupom_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "cupons", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "fatura_id", "tipo": "bigint", "nulo": true, "fk": {"tabela": "faturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "valor_desconto_aplicado", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "utilizado_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_cupons_utilizacoes_cupom_fatura", "colunas": ["cupom_id", "fatura_id"]}],
+      "indices": [
+        {"nome": "idx_cupons_util_cupom_tenant", "colunas": ["cupom_id", "tenant_id"]},
+        {"nome": "idx_cupons_utilizacoes_tenant_id", "colunas": ["tenant_id"]},
+        {"nome": "idx_cupons_utilizacoes_assinatura_id", "colunas": ["assinatura_id"]},
+        {"nome": "idx_cupons_utilizacoes_fatura_id", "colunas": ["fatura_id"]}
+      ],
+      "checks": ["valor_desconto_aplicado >= 0"]
+    },
+    {
+      "ordem": 16,
+      "nome": "faturas_itens",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "05",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Registro financeiro: sem soft delete nem exclusão.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "fatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "faturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "tipo_item", "tipo": "varchar(30)", "nulo": false, "enum": "tipo_item_fatura"},
+        {"nome": "referencia_id", "tipo": "bigint", "nulo": true, "nota": "Referência lógica conforme tipo_item, sem FK."},
+        {"nome": "descricao", "tipo": "varchar(255)", "nulo": false},
+        {"nome": "quantidade", "tipo": "int", "nulo": false},
+        {"nome": "valor_unitario", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "subtotal", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "desconto", "tipo": "decimal(12,2)", "nulo": false, "padrao": "0.00"},
+        {"nome": "valor_total", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {"nome": "ordem", "tipo": "int", "nulo": false, "padrao": 0},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [],
+      "indices": [{"nome": "idx_faturas_itens_tenant_fatura", "colunas": ["tenant_id", "fatura_id"]}, {"nome": "idx_faturas_itens_fatura_id", "colunas": ["fatura_id"]}],
+      "checks": ["quantidade > 0", "subtotal >= 0", "desconto >= 0", "valor_total >= 0"]
+    },
+    {
+      "ordem": 17,
+      "nome": "assinaturas_historicos",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "03",
+      "escopo": "tenant",
+      "timestamps": "apenas_criacao",
+      "excecao_timestamps": "Registro imutável: não há atualização, logo não há updated_at.",
+      "soft_delete": false,
+      "politica_exclusao": "Trilha imutável: sem exclusão no período de retenção.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "tipo_evento", "tipo": "varchar(30)", "nulo": false, "enum": "tipo_evento_historico"},
+        {"nome": "status_anterior", "tipo": "varchar(30)", "nulo": true, "enum": "status_assinatura"},
+        {"nome": "status_novo", "tipo": "varchar(30)", "nulo": true, "enum": "status_assinatura"},
+        {"nome": "dados_anteriores", "tipo": "json", "nulo": true},
+        {"nome": "dados_novos", "tipo": "json", "nulo": true},
+        {"nome": "ator_id", "tipo": "bigint", "nulo": true, "referencia_externa": "usuarios", "nota": "Usuário ou processo; FK real definida no mapeamento."},
+        {"nome": "ocorrido_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "correlacao_id", "tipo": "varchar(100)", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [],
+      "indices": [
+        {"nome": "idx_assinaturas_hist_tenant_assinatura", "colunas": ["tenant_id", "assinatura_id"]},
+        {"nome": "idx_assinaturas_historicos_assinatura_id", "colunas": ["assinatura_id"]}
+      ],
+      "checks": []
+    },
+    {
+      "ordem": 18,
+      "nome": "assinaturas_alteracoes",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "03",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Encerrar por status; preserva a trilha contratual.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "tipo_alteracao", "tipo": "varchar(30)", "nulo": false, "enum": "tipo_alteracao"},
+        {"nome": "plano_versao_origem_id", "tipo": "bigint", "nulo": true, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "plano_versao_destino_id", "tipo": "bigint", "nulo": true, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "efetivacao_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "prorrateamento_valor", "tipo": "decimal(12,2)", "nulo": true, "nota": "Pode ser negativo quando gera crédito."},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "enum": "status_alteracao"},
+        {"nome": "solicitado_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [],
+      "indices": [
+        {"nome": "idx_assinaturas_alt_tenant_assinatura", "colunas": ["tenant_id", "assinatura_id"]},
+        {"nome": "idx_assinaturas_alteracoes_assinatura_id", "colunas": ["assinatura_id"]},
+        {"nome": "idx_assinaturas_alteracoes_plano_versao_origem_id", "colunas": ["plano_versao_origem_id"]},
+        {"nome": "idx_assinaturas_alteracoes_plano_versao_destino_id", "colunas": ["plano_versao_destino_id"]}
+      ],
+      "checks": []
+    },
+    {
+      "ordem": 19,
+      "nome": "pagamentos_eventos",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "05",
+      "escopo": "tenant_opcional",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Sem exclusão antes da retenção definida; acesso restrito.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "provedor_pagamento_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "provedores_pagamento", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}
+        },
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": true,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "evento_externo_id", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "chave_deduplicacao", "tipo": "varchar(255)", "nulo": false, "nota": "ID do provedor quando garantido; senão hash SHA-256 do evento canônico."},
+        {"nome": "tipo", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "payload_referencia", "tipo": "varchar(255)", "nulo": true, "nota": "Referência a armazenamento restrito; sem dados sensíveis."},
+        {"nome": "assinatura_externa_id", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "recebido_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "processado_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "status_processamento", "tipo": "varchar(30)", "nulo": false, "padrao": "recebido", "enum": "status_processamento_evento"},
+        {"nome": "tentativas", "tipo": "int", "nulo": false, "padrao": 0},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_pagamentos_eventos_provedor_chave", "colunas": ["provedor_pagamento_id", "chave_deduplicacao"]}],
+      "indices": [{"nome": "idx_pagamentos_eventos_status", "colunas": ["status_processamento", "recebido_em"]}, {"nome": "idx_pagamentos_eventos_tenant_id", "colunas": ["tenant_id"]}],
+      "checks": ["tentativas >= 0"]
+    },
+    {
+      "ordem": 20,
+      "nome": "pagamentos_reembolsos",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "05",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Registro financeiro: sem soft delete nem exclusão.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "pagamento_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "pagamentos", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "reembolso_externo_id", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "valor", "tipo": "decimal(12,2)", "nulo": false},
+        {"nome": "moeda", "tipo": "char(3)", "nulo": false},
+        {"nome": "motivo", "tipo": "varchar(255)", "nulo": true},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "enum": "status_reembolso"},
+        {"nome": "solicitado_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "concluido_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_reembolsos_pagamento_externo", "colunas": ["pagamento_id", "reembolso_externo_id"]}],
+      "indices": [{"nome": "idx_reembolsos_tenant_status", "colunas": ["tenant_id", "status"]}],
+      "checks": ["valor > 0"]
+    },
+    {
+      "ordem": 21,
+      "nome": "consumos_eventos",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "04",
+      "escopo": "tenant",
+      "timestamps": "apenas_criacao",
+      "excecao_timestamps": "Evento imutável: correção por evento de compensação, nunca por atualização.",
+      "soft_delete": false,
+      "politica_exclusao": "Evento imutável: sem exclusão no período de retenção.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "assinatura_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "assinaturas", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "recurso", "tipo": "varchar(100)", "nulo": false},
+        {"nome": "quantidade", "tipo": "bigint", "nulo": false, "nota": "Negativa apenas em compensação."},
+        {"nome": "ocorrido_em", "tipo": "timestamp", "nulo": false},
+        {"nome": "chave_idempotencia", "tipo": "varchar(255)", "nulo": false},
+        {"nome": "origem", "tipo": "varchar(100)", "nulo": true},
+        {
+          "nome": "evento_compensado_id",
+          "tipo": "bigint",
+          "nulo": true,
+          "fk": {"tabela": "consumos_eventos", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Acréscimo: liga a compensação ao evento original."
+        },
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_consumos_eventos_tenant_chave", "colunas": ["tenant_id", "chave_idempotencia"]}],
+      "indices": [
+        {"nome": "idx_consumos_eventos_assinatura_rec", "colunas": ["assinatura_id", "recurso", "ocorrido_em"]},
+        {"nome": "idx_consumos_eventos_evento_compensado_id", "colunas": ["evento_compensado_id"]}
+      ],
+      "checks": ["quantidade <> 0"]
+    },
+    {
+      "ordem": 22,
+      "nome": "tenants_beneficios",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "04",
+      "escopo": "tenant",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Encerrar por fim; preserva a auditoria.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {
+          "nome": "tenant_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "tenants", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "Tenant já existente no projeto; tipo e tabela reais vão no mapeamento."
+        },
+        {"nome": "recurso", "tipo": "varchar(100)", "nulo": true},
+        {"nome": "funcionalidade_id", "tipo": "bigint", "nulo": true, "fk": {"tabela": "funcionalidades", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "tipo_beneficio", "tipo": "varchar(30)", "nulo": false, "enum": "tipo_beneficio"},
+        {"nome": "quantidade_extra", "tipo": "bigint", "nulo": true},
+        {"nome": "inicio", "tipo": "timestamp", "nulo": false},
+        {"nome": "fim", "tipo": "timestamp", "nulo": true},
+        {"nome": "justificativa", "tipo": "varchar(500)", "nulo": false},
+        {"nome": "concedido_por", "tipo": "bigint", "nulo": true, "referencia_externa": "usuarios", "nota": "FK real definida no mapeamento."},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [],
+      "indices": [{"nome": "idx_tenants_beneficios_tenant_fim", "colunas": ["tenant_id", "fim"]}, {"nome": "idx_tenants_beneficios_funcionalidade_id", "colunas": ["funcionalidade_id"]}],
+      "checks": ["recurso IS NOT NULL OR funcionalidade_id IS NOT NULL", "fim IS NULL OR fim > inicio", "quantidade_extra IS NULL OR quantidade_extra > 0"]
+    },
+    {
+      "ordem": 23,
+      "nome": "planos_adicionais",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "06",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Exclusão física bloqueada por FK RESTRICT; encerrar por status ou ativo.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_versao_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_versoes", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "adicional_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "adicionais", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {"nome": "habilitado", "tipo": "boolean", "nulo": false, "padrao": true},
+        {"nome": "quantidade_maxima", "tipo": "int", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_planos_adicionais_versao_adicional", "colunas": ["plano_versao_id", "adicional_id"]}],
+      "indices": [{"nome": "idx_planos_adicionais_adicional_id", "colunas": ["adicional_id"]}],
+      "checks": ["quantidade_maxima IS NULL OR quantidade_maxima > 0"]
+    },
+    {
+      "ordem": 24,
+      "nome": "planos_precos_provedores",
+      "grupo": "E",
+      "natureza": "complementar",
+      "fase": "05",
+      "escopo": "global",
+      "timestamps": "completos",
+      "soft_delete": false,
+      "politica_exclusao": "Desativar por status.",
+      "colunas": [
+        {"nome": "id", "tipo": "bigint", "nulo": false, "nota": "Chave primária; outro tipo só por ADR de chaves."},
+        {"nome": "plano_preco_id", "tipo": "bigint", "nulo": false, "fk": {"tabela": "planos_precos", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"}},
+        {
+          "nome": "provedor_pagamento_id",
+          "tipo": "bigint",
+          "nulo": false,
+          "fk": {"tabela": "provedores_pagamento", "coluna": "id", "on_delete": "RESTRICT", "on_update": "RESTRICT"},
+          "nota": "A linha do provedor já identifica o ambiente."
+        },
+        {"nome": "preco_externo_id", "tipo": "varchar(255)", "nulo": false},
+        {"nome": "status", "tipo": "varchar(30)", "nulo": false, "padrao": "pendente", "enum": "status_preco_provedor"},
+        {"nome": "sincronizado_em", "tipo": "timestamp", "nulo": true},
+        {"nome": "created_at", "tipo": "timestamp", "nulo": false},
+        {"nome": "updated_at", "tipo": "timestamp", "nulo": false}
+      ],
+      "unicos": [{"nome": "uq_precos_provedores_provedor_externo", "colunas": ["provedor_pagamento_id", "preco_externo_id"]}],
+      "indices": [{"nome": "idx_precos_provedores_preco", "colunas": ["plano_preco_id", "provedor_pagamento_id"]}],
+      "checks": []
+    }
+  ]
+}

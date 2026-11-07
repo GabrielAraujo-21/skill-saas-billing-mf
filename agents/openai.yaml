@@ -1,0 +1,6 @@
+interface:
+  display_name: "SaaS Billing MF"
+  short_description: "Contrato canônico de planos, assinaturas e cobrança para SaaS Laravel"
+  default_prompt: "Use $skill-saas-billing-mf no modo diagnóstico para comparar o módulo comercial deste projeto com o contrato canônico, sem alterar arquivos."
+policy:
+  allow_implicit_invocation: true

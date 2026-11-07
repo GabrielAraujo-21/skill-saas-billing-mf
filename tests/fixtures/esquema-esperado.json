@@ -1,0 +1,290 @@
+{
+  "schema_version": "1.0.0",
+  "status_assinatura": ["pendente", "trial", "ativa", "inadimplente", "suspensa", "cancelamento_agendado", "cancelada", "expirada"],
+  "tabelas": {
+    "planos": {
+      "ordem": 1,
+      "fase": "01",
+      "colunas": ["id", "nome", "slug", "descricao", "publico_alvo", "destaque", "publico", "ativo", "ordem_exibicao", "created_at", "updated_at", "deleted_at"],
+      "unicos": [["slug"]],
+      "fks": {}
+    },
+    "planos_versoes": {
+      "ordem": 2,
+      "fase": "01",
+      "colunas": ["id", "plano_id", "numero_versao", "nome_versao", "status", "vigencia_inicio", "vigencia_fim", "trial_dias", "created_at", "updated_at"],
+      "unicos": [["plano_id", "numero_versao"]],
+      "fks": {"plano_id": "planos"}
+    },
+    "planos_precos": {
+      "ordem": 3,
+      "fase": "01",
+      "colunas": ["id", "plano_versao_id", "periodicidade", "moeda", "modalidade_preco", "valor", "valor_implantacao", "ativo", "created_at", "updated_at"],
+      "unicos": [["plano_versao_id", "periodicidade", "moeda"]],
+      "fks": {"plano_versao_id": "planos_versoes"}
+    },
+    "funcionalidades": {"ordem": 4, "fase": "02", "colunas": ["id", "codigo", "nome", "descricao", "categoria", "ativo", "created_at", "updated_at"], "unicos": [["codigo"]], "fks": {}},
+    "planos_funcionalidades": {
+      "ordem": 5,
+      "fase": "02",
+      "colunas": ["id", "plano_versao_id", "funcionalidade_id", "habilitado", "created_at", "updated_at"],
+      "unicos": [["plano_versao_id", "funcionalidade_id"]],
+      "fks": {"plano_versao_id": "planos_versoes", "funcionalidade_id": "funcionalidades"}
+    },
+    "planos_limites": {
+      "ordem": 6,
+      "fase": "02",
+      "colunas": ["id", "plano_versao_id", "recurso", "limite", "periodicidade", "created_at", "updated_at"],
+      "unicos": [["plano_versao_id", "recurso", "periodicidade"]],
+      "fks": {"plano_versao_id": "planos_versoes"}
+    },
+    "assinaturas": {
+      "ordem": 7,
+      "fase": "03",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "plano_versao_id",
+        "plano_preco_id",
+        "provedor_pagamento_id",
+        "assinatura_externa_id",
+        "status",
+        "periodicidade",
+        "valor_contratado",
+        "moeda",
+        "trial_inicio",
+        "trial_fim",
+        "periodo_inicio",
+        "periodo_fim",
+        "proxima_cobranca_em",
+        "cancelamento_solicitado_em",
+        "cancelado_em",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [["tenant_id"], ["provedor_pagamento_id", "assinatura_externa_id"]],
+      "fks": {"tenant_id": "tenants", "plano_versao_id": "planos_versoes", "plano_preco_id": "planos_precos", "provedor_pagamento_id": "provedores_pagamento"}
+    },
+    "assinaturas_itens": {
+      "ordem": 8,
+      "fase": "06",
+      "colunas": ["id", "tenant_id", "assinatura_id", "adicional_id", "quantidade", "valor_unitario", "valor_total", "periodicidade", "ativo", "created_at", "updated_at"],
+      "unicos": [],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas", "adicional_id": "adicionais"}
+    },
+    "assinaturas_consumos": {
+      "ordem": 9,
+      "fase": "04",
+      "colunas": ["id", "tenant_id", "assinatura_id", "recurso", "periodo_inicio", "periodo_fim", "quantidade_utilizada", "ultima_atualizacao_em", "created_at", "updated_at"],
+      "unicos": [["assinatura_id", "recurso", "periodo_inicio", "periodo_fim"]],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas"}
+    },
+    "provedores_pagamento": {
+      "ordem": 10,
+      "fase": "03",
+      "colunas": ["id", "nome", "codigo", "ambiente", "ativo", "configuracao_referencia", "created_at", "updated_at"],
+      "unicos": [["codigo", "ambiente"]],
+      "fks": {}
+    },
+    "faturas": {
+      "ordem": 11,
+      "fase": "05",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "assinatura_id",
+        "numero",
+        "competencia",
+        "vencimento",
+        "subtotal",
+        "desconto",
+        "valor_total",
+        "moeda",
+        "status",
+        "pago_em",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [["numero"]],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas"}
+    },
+    "pagamentos": {
+      "ordem": 12,
+      "fase": "05",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "fatura_id",
+        "provedor_pagamento_id",
+        "transacao_externa_id",
+        "chave_idempotencia",
+        "metodo_pagamento",
+        "valor",
+        "moeda",
+        "status",
+        "pago_em",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [["chave_idempotencia"], ["provedor_pagamento_id", "transacao_externa_id"]],
+      "fks": {"tenant_id": "tenants", "fatura_id": "faturas", "provedor_pagamento_id": "provedores_pagamento"}
+    },
+    "adicionais": {
+      "ordem": 13,
+      "fase": "06",
+      "colunas": ["id", "codigo", "nome", "descricao", "recurso", "quantidade_recurso", "valor", "periodicidade", "ativo", "created_at", "updated_at"],
+      "unicos": [["codigo"]],
+      "fks": {}
+    },
+    "cupons": {
+      "ordem": 14,
+      "fase": "06",
+      "colunas": [
+        "id",
+        "codigo",
+        "descricao",
+        "tipo_desconto",
+        "valor_desconto",
+        "quantidade_maxima",
+        "quantidade_por_tenant",
+        "valido_inicio",
+        "valido_fim",
+        "ativo",
+        "cumulativo",
+        "planos_elegiveis",
+        "periodicidades_elegiveis",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [["codigo"]],
+      "fks": {}
+    },
+    "cupons_utilizacoes": {
+      "ordem": 15,
+      "fase": "06",
+      "colunas": ["id", "cupom_id", "tenant_id", "assinatura_id", "fatura_id", "valor_desconto_aplicado", "utilizado_em", "created_at", "updated_at"],
+      "unicos": [["cupom_id", "fatura_id"]],
+      "fks": {"cupom_id": "cupons", "tenant_id": "tenants", "assinatura_id": "assinaturas", "fatura_id": "faturas"}
+    },
+    "faturas_itens": {
+      "ordem": 16,
+      "fase": "05",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "fatura_id",
+        "tipo_item",
+        "referencia_id",
+        "descricao",
+        "quantidade",
+        "valor_unitario",
+        "subtotal",
+        "desconto",
+        "valor_total",
+        "moeda",
+        "ordem",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [],
+      "fks": {"tenant_id": "tenants", "fatura_id": "faturas"}
+    },
+    "assinaturas_historicos": {
+      "ordem": 17,
+      "fase": "03",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "assinatura_id",
+        "tipo_evento",
+        "status_anterior",
+        "status_novo",
+        "dados_anteriores",
+        "dados_novos",
+        "ator_id",
+        "ocorrido_em",
+        "correlacao_id",
+        "created_at"
+      ],
+      "unicos": [],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas"}
+    },
+    "assinaturas_alteracoes": {
+      "ordem": 18,
+      "fase": "03",
+      "colunas": [
+        "id",
+        "tenant_id",
+        "assinatura_id",
+        "tipo_alteracao",
+        "plano_versao_origem_id",
+        "plano_versao_destino_id",
+        "efetivacao_em",
+        "prorrateamento_valor",
+        "status",
+        "solicitado_em",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas", "plano_versao_origem_id": "planos_versoes", "plano_versao_destino_id": "planos_versoes"}
+    },
+    "pagamentos_eventos": {
+      "ordem": 19,
+      "fase": "05",
+      "colunas": [
+        "id",
+        "provedor_pagamento_id",
+        "tenant_id",
+        "evento_externo_id",
+        "chave_deduplicacao",
+        "tipo",
+        "payload_referencia",
+        "assinatura_externa_id",
+        "recebido_em",
+        "processado_em",
+        "status_processamento",
+        "tentativas",
+        "created_at",
+        "updated_at"
+      ],
+      "unicos": [["provedor_pagamento_id", "chave_deduplicacao"]],
+      "fks": {"provedor_pagamento_id": "provedores_pagamento", "tenant_id": "tenants"}
+    },
+    "pagamentos_reembolsos": {
+      "ordem": 20,
+      "fase": "05",
+      "colunas": ["id", "tenant_id", "pagamento_id", "reembolso_externo_id", "valor", "moeda", "motivo", "status", "solicitado_em", "concluido_em", "created_at", "updated_at"],
+      "unicos": [["pagamento_id", "reembolso_externo_id"]],
+      "fks": {"tenant_id": "tenants", "pagamento_id": "pagamentos"}
+    },
+    "consumos_eventos": {
+      "ordem": 21,
+      "fase": "04",
+      "colunas": ["id", "tenant_id", "assinatura_id", "recurso", "quantidade", "ocorrido_em", "chave_idempotencia", "origem", "evento_compensado_id", "created_at"],
+      "unicos": [["tenant_id", "chave_idempotencia"]],
+      "fks": {"tenant_id": "tenants", "assinatura_id": "assinaturas", "evento_compensado_id": "consumos_eventos"}
+    },
+    "tenants_beneficios": {
+      "ordem": 22,
+      "fase": "04",
+      "colunas": ["id", "tenant_id", "recurso", "funcionalidade_id", "tipo_beneficio", "quantidade_extra", "inicio", "fim", "justificativa", "concedido_por", "created_at", "updated_at"],
+      "unicos": [],
+      "fks": {"tenant_id": "tenants", "funcionalidade_id": "funcionalidades"}
+    },
+    "planos_adicionais": {
+      "ordem": 23,
+      "fase": "06",
+      "colunas": ["id", "plano_versao_id", "adicional_id", "habilitado", "quantidade_maxima", "created_at", "updated_at"],
+      "unicos": [["plano_versao_id", "adicional_id"]],
+      "fks": {"plano_versao_id": "planos_versoes", "adicional_id": "adicionais"}
+    },
+    "planos_precos_provedores": {
+      "ordem": 24,
+      "fase": "05",
+      "colunas": ["id", "plano_preco_id", "provedor_pagamento_id", "preco_externo_id", "status", "sincronizado_em", "created_at", "updated_at"],
+      "unicos": [["provedor_pagamento_id", "preco_externo_id"]],
+      "fks": {"plano_preco_id": "planos_precos", "provedor_pagamento_id": "provedores_pagamento"}
+    }
+  }
+}

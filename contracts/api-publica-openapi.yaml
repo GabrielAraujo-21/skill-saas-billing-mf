@@ -1,0 +1,142 @@
+openapi: 3.1.0
+info:
+  title: API pública de planos
+  version: 1.0.0
+  description: >-
+    Catálogo publicado, somente leitura, para páginas públicas. Não expõe identificadores internos,
+    dados de tenant, identificadores de provedor nem credenciais. Rotas de gestão ficam fora deste contrato.
+paths:
+  /api/v1/public/plans:
+    get:
+      operationId: listarPlanosPublicos
+      summary: Lista os planos públicos com a versão publicada vigente
+      security: []
+      parameters:
+        - name: moeda
+          in: query
+          required: false
+          description: Filtra os preços pela moeda.
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+      responses:
+        '200':
+          description: Catálogo publicado
+          headers:
+            Cache-Control:
+              description: Cache controlado, por exemplo public, max-age=300. Invalidar ao publicar versão.
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dados]
+                additionalProperties: false
+                properties:
+                  dados:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlanoPublico'
+        '304':
+          description: Catálogo não alterado
+        '422':
+          description: Parâmetro inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '429':
+          description: Limite de requisições excedido
+components:
+  schemas:
+    PlanoPublico:
+      type: object
+      additionalProperties: false
+      required: [slug, nome, destaque, ordem_exibicao, versao, trial_dias, precos, funcionalidades, limites]
+      properties:
+        slug:
+          type: string
+        nome:
+          type: string
+        descricao:
+          type: [string, 'null']
+        publico_alvo:
+          type: [string, 'null']
+        destaque:
+          type: boolean
+        ordem_exibicao:
+          type: integer
+        versao:
+          type: integer
+          description: Número da versão publicada.
+        trial_dias:
+          type: integer
+          minimum: 0
+        precos:
+          type: array
+          items:
+            $ref: '#/components/schemas/PrecoPublico'
+        funcionalidades:
+          type: array
+          items:
+            $ref: '#/components/schemas/FuncionalidadePublica'
+        limites:
+          type: array
+          items:
+            $ref: '#/components/schemas/LimitePublico'
+    PrecoPublico:
+      type: object
+      additionalProperties: false
+      required: [periodicidade, moeda, modalidade_preco, valor, valor_implantacao]
+      properties:
+        periodicidade:
+          type: string
+          enum: [mensal, anual]
+        moeda:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        modalidade_preco:
+          type: string
+          enum: [fixo, a_partir_de, sob_consulta]
+        valor:
+          type: [string, 'null']
+          pattern: '^\d+\.\d{2}$'
+          description: Decimal como string; nulo em sob_consulta.
+        valor_implantacao:
+          type: string
+          pattern: '^\d+\.\d{2}$'
+    FuncionalidadePublica:
+      type: object
+      additionalProperties: false
+      required: [codigo, nome]
+      properties:
+        codigo:
+          type: string
+        nome:
+          type: string
+    LimitePublico:
+      type: object
+      additionalProperties: false
+      required: [recurso, limite, periodicidade]
+      properties:
+        recurso:
+          type: string
+        limite:
+          type: [integer, 'null']
+          description: Nulo significa ilimitado comercialmente, sujeito à política de uso justo publicada.
+        periodicidade:
+          type: string
+          enum: [mensal, anual, sem_periodo]
+    Erro:
+      type: object
+      required: [mensagem]
+      properties:
+        mensagem:
+          type: string
+        erros:
+          type: object
+          additionalProperties: true

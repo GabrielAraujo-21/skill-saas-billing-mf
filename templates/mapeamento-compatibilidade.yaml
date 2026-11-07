@@ -1,0 +1,21 @@
+# Toda diferença entre o projeto e o manifesto fica aqui. O teste de deriva lê este arquivo.
+schema_version: "1.0.0"
+revisao: 1
+entidades_externas:
+  tenants:
+    tabela: tenants
+    chave: id
+    tipo: bigint
+  usuarios:
+    tabela: users
+    chave: id
+    tipo: bigint
+desvios: []
+# Exemplo de desvio:
+# - tipo: nome_coluna          # nome_tabela | nome_coluna | tipo_coluna | tecnica_sgbd | fase_adiada
+#   contrato: faturas.numero
+#   projeto: faturas.codigo
+#   motivo: Coluna em uso por integração existente.
+#   adr: ADR-0000
+#   aprovado_por: ""
+#   teste: ""
